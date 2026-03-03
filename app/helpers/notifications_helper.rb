@@ -78,9 +78,9 @@ module NotificationsHelper
 
   def push_notification_level_options_for(settings)
     options_for_select([
-      [ "Only @mentions", "only_mentions" ],
+      [ "All activity", "all_activity" ],
       [ "Comments and @mentions", "comments_and_mentions" ],
-      [ "All activity", "all_activity" ]
+      [ "Only @mentions", "only_mentions" ]
     ], settings.push_notification_level)
   end
 
