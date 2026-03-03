@@ -11,7 +11,7 @@ The steps to configure your very own Fizzy are:
 
 1. Fork the repo
 2. Initialize Kamal by running `kamal init`. This command generates the `.kamal` directory along with the required configuration files, including `.kamal/secrets`.
-3. Edit few things in config/deploy.yml and .kamal/secrets
+3. Edit a few things in config/deploy.yml and .kamal/secrets
 4. Run `kamal setup` to do your first deploy.
 
 We'll go through each of these in turn.
