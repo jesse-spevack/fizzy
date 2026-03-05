@@ -134,6 +134,48 @@ __Response:__
 
 Returns `204 No Content` on success.
 
+#### Create an access token via the API
+
+You can programmatically create a personal access token using either a session cookie or an existing Bearer token:
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -H "Cookie: session_token=eyJfcmFpbHMi..." \
+  -d '{"access_token": {"description": "Fizzy CLI", "permission": "write"}}' \
+  https://app.fizzy.do/1234567/my/access_tokens
+```
+
+Or with a Bearer token (must have `write` permission):
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -H "Authorization: Bearer put-your-access-token-here" \
+  -d '{"access_token": {"description": "Fizzy CLI", "permission": "write"}}' \
+  https://app.fizzy.do/1234567/my/access_tokens
+```
+
+The `permission` field accepts `read` or `write`.
+
+__Response:__
+
+```
+HTTP/1.1 201 Created
+```
+
+```json
+{
+  "token": "4f9Q6d2wXr8Kp1Ls0Vz3BnTa",
+  "description": "Fizzy CLI",
+  "permission": "write"
+}
+```
+
+Store the `token` value securely — it won't be retrievable again. Use it as a Bearer token for subsequent API requests.
+
 ## Caching
 
 Most endpoints return [ETag](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/ETag) and [Cache-Control](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cache-Control) headers. You can use these to avoid re-downloading unchanged data.
