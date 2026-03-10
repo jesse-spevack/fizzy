@@ -98,6 +98,8 @@ class Account::DataTransfer::RecordSet
       end
 
       check_associations_dont_exist(data)
+
+      data
     end
 
     def check_associations_dont_exist(data)
