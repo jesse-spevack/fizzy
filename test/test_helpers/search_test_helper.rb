@@ -34,7 +34,7 @@ module SearchTestHelper
         ActiveRecord::Base.connection.execute("DELETE FROM search_records_fts")
       else
         Search::Record::Trilogy::SHARD_COUNT.times do |shard_id|
-          ActiveRecord::Base.connection.execute("DELETE FROM search_records_#{shard_id}")
+          ActiveRecord::Base.connection.execute("TRUNCATE TABLE search_records_#{shard_id}")
         end
       end
     end
