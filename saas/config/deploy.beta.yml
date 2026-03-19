@@ -10,10 +10,6 @@
       "dbs" => {
         "solidqueue" => "fizzy-beta-solidqueue-db-101.df-iad-int.37signals.com"
       }
-    },
-      "dbs" => {
-        "solidqueue" => "fizzy-beta-solidqueue-db-104.df-iad-int.37signals.com"
-      }
     }
   }
   @beta_number = ENV["BETA_NUMBER"]
