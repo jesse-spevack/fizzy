@@ -74,7 +74,7 @@ This environment uses a FlashBlade bucket for blob storage.
 
 Beta is primarily intended for testing product features. It uses the same production database and Active Storage configuration.
 
-There is 1 beta environments:
+There is 1 beta environment:
 
 - https://beta1.fizzy-beta.com
 
