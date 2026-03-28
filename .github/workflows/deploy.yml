@@ -63,6 +63,7 @@ jobs:
 
       - name: Write Kamal secrets
         run: |
+          mkdir -p .kamal
           cat > .kamal/secrets << EOF
           SECRET_KEY_BASE=$SECRET_KEY_BASE
           VAPID_PRIVATE_KEY=$VAPID_PRIVATE_KEY
