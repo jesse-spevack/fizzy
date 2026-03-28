@@ -1,0 +1,80 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/${{ secrets.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Fetch secrets from Secret Manager
+        run: |
+          fetch_secret() {
+            local name=$1
+            local secret_name=$2
+            local value
+            value=$(gcloud secrets versions access latest --secret="$secret_name")
+            echo "::add-mask::$value"
+            echo "$name=$value" >> "$GITHUB_ENV"
+          }
+
+          fetch_secret SECRET_KEY_BASE fizzy-secret-key-base
+          fetch_secret VAPID_PRIVATE_KEY fizzy-vapid-private-key
+          fetch_secret VAPID_PUBLIC_KEY fizzy-vapid-public-key
+          fetch_secret SMTP_USERNAME fizzy-smtp-username
+          fetch_secret SMTP_PASSWORD fizzy-smtp-password
+
+          KAMAL_TOKEN=$(gcloud auth print-access-token)
+          echo "::add-mask::$KAMAL_TOKEN"
+          echo "KAMAL_REGISTRY_PASSWORD=$KAMAL_TOKEN" >> "$GITHUB_ENV"
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: .ruby-version
+          bundler-cache: true
+
+      - name: Add VM to known_hosts
+        run: ssh-keyscan 34.63.167.166 >> ~/.ssh/known_hosts
+
+      - name: Write Kamal secrets
+        run: |
+          cat > .kamal/secrets << EOF
+          SECRET_KEY_BASE=$SECRET_KEY_BASE
+          VAPID_PRIVATE_KEY=$VAPID_PRIVATE_KEY
+          VAPID_PUBLIC_KEY=$VAPID_PUBLIC_KEY
+          SMTP_USERNAME=$SMTP_USERNAME
+          SMTP_PASSWORD=$SMTP_PASSWORD
+          KAMAL_REGISTRY_PASSWORD=$KAMAL_REGISTRY_PASSWORD
+          EOF
+
+      - name: Deploy with Kamal
+        run: bin/kamal deploy
+
+      - name: Prune old Docker images on server
+        if: success()
+        run: ssh jesse@34.63.167.166 "docker image prune -a --filter 'until=72h' -f"
