@@ -1,25 +1,17 @@
-# Name of this app
 service: fizzy
-image: fizzy
+image: very-normal/repository-2/fizzy
 
-
-#-- About your deployment --#
-
-# Where to deploy fizzy
 servers:
   web:
-    - fizzy.example.com  # Set your server name here
+    - 34.63.167.166
 
-# How you connect to your server
 ssh:
-  user: root  # If you use a different username to SSH to your server, specify it here
+  user: jesse
 
-# Automatic SSL
 proxy:
-  ssl: true                # Set this to false if you *don't* want SSL
-  host: fizzy.example.com  # Set your server name here to use automatic SSL
+  ssl: true
+  host: fizzy.verynormal.dev
 
-# Your application configuration (secrets come from .kamal/secrets).
 env:
   secret:
     - SECRET_KEY_BASE
@@ -28,37 +20,34 @@ env:
     - SMTP_USERNAME
     - SMTP_PASSWORD
   clear:
-    BASE_URL: https://fizzy.example.com # The public URL of your Fizzy instance
-    MAILER_FROM_ADDRESS: support@example.com # The email "from" address that Fizzy sends email from
-    SMTP_ADDRESS: mail.example.com # The SMTP server you'll use to send email
-    MULTI_TENANT: false # Set to true to allow multiple accounts to sign up
-    SOLID_QUEUE_IN_PUMA: true # Run background jobs in the app container
+    BASE_URL: https://fizzy.verynormal.dev
+    MAILER_FROM_ADDRESS: fizzy@verynormal.dev
+    SMTP_ADDRESS: smtp.resend.com
+    MULTI_TENANT: false
+    SOLID_QUEUE_IN_PUMA: true
 
-
-#-- General configuration --#
-
-# Use a local registry to deploy
 registry:
-  server: localhost:5555
+  server: us-docker.pkg.dev
+  username: oauth2accesstoken
+  password:
+    - KAMAL_REGISTRY_PASSWORD
 
-# Handy aliases for interacting with your deployment. For eaxmple: `bin/kamal console` will connect to a
-# Rails console in production.
 aliases:
   console: app exec --interactive --reuse "bin/rails console"
   shell: app exec --interactive --reuse "bash"
   logs: app logs -f
   dbc: app exec --interactive --reuse "bin/rails dbconsole --include-password"
 
-# Use a persistent storage volume for sqlite database files and local Active Storage files.
-# Recommended to change this to a mounted volume path that is backed up off server.
 volumes:
   - "fizzy_storage:/rails/storage"
 
-# Bridge fingerprinted assets, like JS and CSS, between versions to avoid
-# hitting 404 on in-flight requests. Combines all files from new and old
-# version inside the asset_path.
 asset_path: /rails/public/assets
 
-# Configure the image builder.
+logging:
+  driver: gcplogs
+  options:
+    gcp-project: very-normal
+
 builder:
   arch: amd64
+  remote: ssh://jesse@34.63.167.166
