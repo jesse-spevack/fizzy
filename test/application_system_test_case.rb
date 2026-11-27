@@ -1,5 +1,19 @@
 require "test_helper"
 
+# Capybara 3.40.0 clears the browser storage after each test with the origin
+# "*". Chrome 158 refuses that origin, so every system test fails at reset.
+# This clears all cookies, then the storage of the test server origin. Delete
+# it when a Capybara release stops sending "*".
+module ClearsStorageOfTestServer
+  def execute_cdp(cmd, **params)
+    return super unless cmd == "Storage.clearDataForOrigin" && params[:origin] == "*"
+
+    super("Network.clearBrowserCookies")
+    super(cmd, **params, origin: Capybara.current_session.server.base_url)
+  end
+end
+Capybara::Selenium::Driver::ChromeDriver.prepend(ClearsStorageOfTestServer)
+
 class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
   include TrustedTypesViolationsTestHelper
 
