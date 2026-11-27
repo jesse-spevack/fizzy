@@ -48,6 +48,11 @@ Once you have one, set it in the `SECRET_KEY_BASE` environment variable:
 docker run --env SECRET_KEY_BASE=abcdefabcdef ...
 ```
 
+Personal access tokens and OAuth credentials are looked up by a keyed digest (HMAC-SHA256) rather than by the token itself.
+By default the key is derived from `SECRET_KEY_BASE`, so **changing `SECRET_KEY_BASE` invalidates every personal access token and every connected OAuth app**: people have to generate new tokens and reconnect their apps.
+To keep tokens working across a change of `SECRET_KEY_BASE`, set the key separately in `OAUTH_TOKEN_PEPPER` (at least 32 characters, for example from `bin/rails secret`).
+Set it before upgrading to a version that digests tokens, or before anyone creates one, and then keep it: changing, adding or removing it later invalidates tokens in the same way.
+
 #### SSL
 
 If you want the Fizzy container to handle its own SSL automatically, you just need to specify the domain name that you're running it on.
@@ -143,12 +148,42 @@ If you're using a provider other than AWS, you will also need some of the follow
 - `S3_REQUEST_CHECKSUM_CALCULATION`
 - `S3_RESPONSE_CHECKSUM_VALIDATION`
 
+If your storage provider is on a different site than your Fizzy instance and doesn't return CORS headers on presigned URL responses, inline images may fail to load.
+In that case, set `SERVICE_WORKER_CORS_ENABLED=false` so the service worker fetches uploaded files without CORS mode.
+
 #### Multi-tenant mode
 
 By default, when you run the Fizzy Docker image you'll be limited to creating a single account (although that account can have as many users as you like).
 This is for convenience: typically when you self-host you'll be running a single account, so in this mode new account signups are automatically disabled as soon as you've created your first account.
 
 If you do want to allow multiple accounts to be created in your instance, set `MULTI_TENANT=true`
+
+#### OAuth (optional)
+
+Fizzy includes an OAuth 2.1 authorization server so that tools such as MCP clients can connect to your account without a personal access token. It is off by default: while it is off, the OAuth discovery, registration, authorization and token endpoints answer 404, and tokens issued through OAuth are not accepted. Personal access tokens work either way.
+
+To turn it on, set `OAUTH_ACCEPTANCE_ENABLED=true`.
+
+If you need to stop new connections in an emergency, also set `OAUTH_ISSUANCE_ENABLED=false`: nothing new can connect and no token is refreshed, while access tokens already issued keep working until they expire, an hour after issue. People can always disconnect apps from their profile, whichever way these are set.
+
+Apps that register themselves (dynamic client registration, which Cursor, Claude Desktop and most MCP clients use) may send people back only to a callback Fizzy accepts:
+
+- a callback on the person's own device: `http://127.0.0.1`, `http://[::1]` or `http://localhost`, on any port;
+- the `cursor://` and `claude://` desktop app schemes;
+- an `https` callback on any host but your Fizzy's own (the host in `BASE_URL`, and the one the registration reached it at), with no username, password or `#fragment` in it.
+
+Plain `http` is refused for anything but those device addresses. Hosted clients, such as VS Code's, call back over `https`, so there's no list of hosts to keep. Because anyone can register an app, the consent screen names the app by the host it sends people back to and says the app hasn't been checked.
+
+## Importing an existing Fizzy account
+
+You can move an account between Fizzy instances by exporting it on the old instance and uploading the export zip to the new one during signup.
+
+Imports need free space: at least twice the export file's size, beyond the export itself, since the imported attachments roughly mirror the zip's contents. If there isn't enough, the import fails before it starts and your logs record `import needs ~90 GB free, found 12 GB`. The person importing only sees a generic failure, so check the logs when an import fails for no apparent reason: free up space (or grow the volume) and have them try again. If free space can't be determined, the check is skipped and the import proceeds.
+
+For very large exports:
+
+- Browser uploads pass through Thruster, which drops slow uploads after its read timeout (a 502 before the import ever starts). Raise `THRUSTER_HTTP_READ_TIMEOUT` (seconds) and recreate the container so the setting takes effect.
+- `script/import-account` runs the import directly on the server from a zip already on disk, bypassing the browser upload entirely — handy for multi-gigabyte exports.
 
 ## Example
 

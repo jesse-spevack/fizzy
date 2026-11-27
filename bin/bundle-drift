@@ -3,9 +3,10 @@
 # Since Gemfile.saas evals Gemfile, shared gems should have identical versions.
 #
 # Usage:
-#   bin/bundle-drift [check]   # check for drift (default subcommand)
-#   bin/bundle-drift correct   # restore alignment (Gemfile.saas.lock is authoritative)
-#   bin/bundle-drift forward   # push Gemfile.lock changes into Gemfile.saas.lock
+#   bin/bundle-drift [check]     # check for drift (default subcommand)
+#   bin/bundle-drift correct     # restore alignment (Gemfile.saas.lock is authoritative)
+#   bin/bundle-drift forward     # push Gemfile.lock changes into Gemfile.saas.lock
+#   bin/bundle-drift self-test   # run built-in tests
 require "bundler"
 require "fileutils"
 
@@ -31,18 +32,50 @@ class GemfileDriftChecker
 
     def find_drift
       oss_specs, saas_specs = specs_hash(@oss_lockfile), specs_hash(@saas_lockfile)
+      oss_deps, saas_deps = deps_hash(@oss_lockfile), deps_hash(@saas_lockfile)
+      oss_sdeps, saas_sdeps = spec_deps_hash(@oss_lockfile), spec_deps_hash(@saas_lockfile)
       shared_gems = oss_specs.keys & saas_specs.keys
+      shared_deps = oss_deps.keys & saas_deps.keys
+      missing_gems = oss_specs.keys - saas_specs.keys
 
-      shared_gems.filter_map do |name|
+      shared_drift = shared_gems.filter_map do |name|
         oss_version, saas_version = oss_specs[name], saas_specs[name]
-        if oss_version != saas_version
-          { name: name, oss: oss_version, saas: saas_version }
+        version_drift = oss_version != saas_version
+
+        oss_dep, saas_dep = oss_deps[name], saas_deps[name]
+        dep_drift = shared_deps.include?(name) && oss_dep != saas_dep
+
+        oss_sd, saas_sd = oss_sdeps[name] || {}, saas_sdeps[name] || {}
+        subdep_changes = (oss_sd.keys | saas_sd.keys).filter_map do |dep_name|
+          if oss_sd[dep_name] != saas_sd[dep_name]
+            { name: dep_name, oss: oss_sd[dep_name], saas: saas_sd[dep_name] }
+          end
         end
-      end.sort_by { |d| d[:name] }
+
+        if version_drift || dep_drift || subdep_changes.any?
+          { name: name, oss: oss_version, saas: saas_version, oss_dep: oss_dep, saas_dep: saas_dep, subdep_changes: subdep_changes }
+        end
+      end
+
+      missing_drift = missing_gems.map do |name|
+        { name: name, oss: oss_specs[name], saas: nil, missing: true }
+      end
+
+      (shared_drift + missing_drift).sort_by { |d| d[:name] }
     end
 
     def specs_hash(lockfile)
       lockfile.specs.to_h { |spec| [ spec.name, spec.version.to_s ] }
+    end
+
+    def deps_hash(lockfile)
+      lockfile.dependencies.transform_values { |dep| dep.requirement.to_s }
+    end
+
+    def spec_deps_hash(lockfile)
+      lockfile.specs.to_h do |spec|
+        [spec.name, spec.dependencies.map { |d| [d.name, d.requirement.to_s] }.sort.to_h]
+      end
     end
 
     def report(drift)
@@ -51,18 +84,46 @@ class GemfileDriftChecker
       else
         puts "✗ Gemfile lock files have drifted!\n\n"
 
-        name_width = [ drift.map { |d| d[:name].length }.max, "Gem".length ].max
-        oss_width = [ drift.map { |d| d[:oss].length }.max, "Gemfile.lock".length ].max
-        saas_width = [ drift.map { |d| d[:saas].length }.max, "Gemfile.saas.lock".length ].max
+        missing = drift.select { |d| d[:missing] }
+        spec_drift = drift.select { |d| !d[:missing] && d[:oss] != d[:saas] }
+        dep_drift = drift.select { |d| !d[:missing] && d[:oss_dep] != d[:saas_dep] }
 
-        puts "  #{"Gem".ljust(name_width)}  #{"Gemfile.lock".ljust(oss_width)}  Gemfile.saas.lock"
-        puts "  #{"-" * name_width}  #{"-" * oss_width}  #{"-" * saas_width}"
-
-        drift.each do |d|
-          puts "  #{d[:name].ljust(name_width)}  #{d[:oss].ljust(oss_width)}  #{d[:saas]}"
+        if missing.any?
+          puts "  Gems missing from Gemfile.saas.lock:"
+          missing.each do |d|
+            puts "    #{d[:name]} (#{d[:oss]})"
+          end
         end
 
-        puts "\nRun 'bin/bundle-drift correct' to restore alignment."
+        if spec_drift.any?
+          puts "  Spec versions:"
+          spec_drift.each do |d|
+            puts "    #{d[:name]}: #{d[:oss]} (Gemfile.lock) vs #{d[:saas]} (Gemfile.saas.lock)"
+          end
+        end
+
+        if dep_drift.any?
+          puts "  Dependency requirements:"
+          dep_drift.each do |d|
+            puts "    #{d[:name]}: #{d[:oss_dep]} (Gemfile.lock) vs #{d[:saas_dep]} (Gemfile.saas.lock)"
+          end
+        end
+
+        subdep_drift = drift.select { |d| d[:subdep_changes]&.any? }
+        if subdep_drift.any?
+          puts "  Spec sub-dependency requirements:"
+          subdep_drift.each do |d|
+            d[:subdep_changes].each do |sd|
+              puts "    #{d[:name]} → #{sd[:name]}: #{sd[:oss] || "(absent)"} (Gemfile.lock) vs #{sd[:saas] || "(absent)"} (Gemfile.saas.lock)"
+            end
+          end
+        end
+
+        if missing.any?
+          puts "\nRun 'bin/bundle-drift forward' to add the missing gems to Gemfile.saas.lock."
+        else
+          puts "\nRun 'bin/bundle-drift correct' to restore alignment."
+        end
       end
     end
 end
@@ -74,13 +135,10 @@ class GemfileDriftCorrector
 
     puts "\nRestoring alignment (Gemfile.saas.lock is authoritative)...\n\n"
 
-    # Save original for diff
     original_content = File.read(GEMFILE_LOCK)
 
-    # Seed Gemfile.lock with Gemfile.saas.lock - Bundler will use these as version hints
     FileUtils.cp(GEMFILE_SAAS_LOCK, GEMFILE_LOCK)
 
-    # Re-lock: Bundler prunes SaaS-only gems while preserving shared versions
     puts "▸ Re-locking Gemfile (seeded from Gemfile.saas.lock)"
     unless system("BUNDLE_GEMFILE=Gemfile bundle lock")
       File.write(GEMFILE_LOCK, original_content)
@@ -124,35 +182,222 @@ class GemfileDriftForwarder
     drift = GemfileDriftChecker.new.check
     return puts "\nNothing to forward." if drift.empty?
 
-    puts "\nForwarding Gemfile.lock versions into Gemfile.saas.lock...\n\n"
-
-    original_content = File.read(GEMFILE_SAAS_LOCK)
-    patched_content = original_content.dup
-
-    drift.each do |d|
-      puts "  #{d[:name]} (#{d[:saas]}) → #{d[:name]} (#{d[:oss]})"
-      patched_content.gsub!(/#{Regexp.escape(d[:name])} \(#{Regexp.escape(d[:saas])}([^)]*)\)/) do
-        "#{d[:name]} (#{d[:oss]}#{$1})"
-      end
-    end
-
-    File.write(GEMFILE_SAAS_LOCK, patched_content)
-
-    puts "\n▸ Verifying alignment"
-    new_drift = GemfileDriftChecker.new.check
-
-    if new_drift.empty?
-      puts "\n✓ Lock files are now in sync"
-      show_diff(original_content, patched_content)
-    else
-      puts "\n✗ Lock files still have drift after forwarding."
-      puts "  Restoring original Gemfile.saas.lock."
-      File.write(GEMFILE_SAAS_LOCK, original_content)
-      exit 1
-    end
+    patch_saas(drift)
   end
 
   private
+    def patch_saas(drift)
+      puts "\nForwarding Gemfile.lock changes into Gemfile.saas.lock...\n\n"
+
+      original_content = File.read(GEMFILE_SAAS_LOCK)
+      patched_content = original_content.dup
+
+      drift.each do |d|
+        if d[:missing]
+          puts "  #{d[:name]}: adding spec #{d[:oss]}"
+          patched_content = insert_spec(patched_content, d[:name])
+          patched_content = insert_checksum(patched_content, d[:name])
+          next
+        end
+
+        if d[:oss] != d[:saas]
+          puts "  #{d[:name]}: spec #{d[:saas]} → #{d[:oss]}"
+          patched_content = patch_spec_version(patched_content, d[:name], d[:saas], d[:oss])
+          patched_content = patch_checksum(patched_content, d[:name])
+        end
+
+        if d[:oss_dep] && d[:saas_dep] && d[:oss_dep] != d[:saas_dep]
+          puts "  #{d[:name]}: dep #{d[:saas_dep]} → #{d[:oss_dep]}"
+          patched_content = patch_dependency_requirement(patched_content, d[:name], d[:saas_dep], d[:oss_dep])
+        end
+
+        if d[:subdep_changes]&.any?
+          d[:subdep_changes].each do |sd|
+            if sd[:oss] && sd[:saas]
+              puts "  #{d[:name]} → #{sd[:name]}: subdep #{sd[:saas]} → #{sd[:oss]}"
+              patched_content = patch_spec_subdependency(patched_content, d[:name], sd[:name], sd[:saas], sd[:oss])
+            elsif sd[:oss]
+              puts "  #{d[:name]} → #{sd[:name]}: adding subdep #{sd[:oss]}"
+              patched_content = insert_spec_subdependency(patched_content, d[:name], sd[:name], sd[:oss])
+            else
+              puts "  #{d[:name]} → #{sd[:name]}: removing subdep #{sd[:saas]}"
+              patched_content = remove_spec_subdependency(patched_content, d[:name], sd[:name])
+            end
+          end
+        end
+      end
+
+      File.write(GEMFILE_SAAS_LOCK, patched_content)
+
+      puts "\n▸ Verifying alignment"
+      new_drift = GemfileDriftChecker.new.check
+
+      if new_drift.empty?
+        puts "\n✓ Lock files are now in sync"
+        show_diff(original_content, patched_content)
+      else
+        puts "\n✗ Lock files still have drift after forwarding."
+        puts "  Restoring original Gemfile.saas.lock."
+        File.write(GEMFILE_SAAS_LOCK, original_content)
+        exit 1
+      end
+    end
+
+    def insert_spec(content, name)
+      spec_lines = oss_spec_lines(name) or abort("Couldn't find #{name} in #{GEMFILE_LOCK}.")
+
+      lines = content.lines
+      specs_at = gem_specs_start(lines) or abort("Couldn't find a GEM section in #{GEMFILE_SAAS_LOCK} to add #{name} to.")
+
+      lines.insert(sorted_insertion_point(lines, specs_at, 4, name), *spec_lines).join
+    end
+
+    def insert_checksum(content, name)
+      checksums = oss_checksum_line(name)
+      return content unless checksums
+
+      lines = content.lines
+      checksums_at = lines.index { |line| line == "CHECKSUMS\n" }
+      return content unless checksums_at
+
+      lines.insert(sorted_insertion_point(lines, checksums_at, 2, name), checksums).join
+    end
+
+    def insert_spec_subdependency(content, parent_name, dep_name, requirement)
+      lines = content.lines
+      parent_at = lines.index { |line| spec_line?(line, parent_name) }
+      return content unless parent_at
+
+      lines.insert(sorted_insertion_point(lines, parent_at, 6, dep_name), subdependency_line(dep_name, requirement)).join
+    end
+
+    def remove_spec_subdependency(content, parent_name, dep_name)
+      lines = content.lines
+      parent_at = lines.index { |line| spec_line?(line, parent_name) }
+      return content unless parent_at
+
+      index = parent_at + 1
+      index += 1 while subdependency_line?(lines[index]) && lines[index][/\A {6}(\S+)/, 1] != dep_name
+      return content unless subdependency_line?(lines[index])
+
+      lines.delete_at(index)
+      lines.join
+    end
+
+    def sorted_insertion_point(lines, section_at, indent, name)
+      index = section_at + 1
+
+      while lines[index]&.match?(/\A {#{indent},}\S/)
+        entry = lines[index][/\A {#{indent}}(\S+)/, 1]
+        break if entry && entry > name
+        index += 1
+      end
+
+      index
+    end
+
+    def gem_specs_start(lines)
+      gem_at = lines.index { |line| line == "GEM\n" }
+      gem_at && (gem_at...lines.size).find { |i| lines[i] == "  specs:\n" }
+    end
+
+    def oss_spec_lines(name)
+      lines = File.read(GEMFILE_LOCK).lines
+      start = lines.index { |line| spec_line?(line, name) }
+      return nil unless start
+
+      finish = start
+      finish += 1 while lines[finish] && (spec_line?(lines[finish], name) || subdependency_line?(lines[finish]))
+      lines[start...finish]
+    end
+
+    def subdependency_line(dep_name, requirement)
+      if requirement == ">= 0"
+        "      #{dep_name}\n"
+      else
+        "      #{dep_name} (#{requirement})\n"
+      end
+    end
+
+    def spec_line?(line, name)
+      line.match?(/\A {4}#{Regexp.escape(name)} \(/)
+    end
+
+    def subdependency_line?(line)
+      line&.match?(/\A {6}\S/)
+    end
+
+    def patch_spec_version(content, name, old_version, new_version)
+      map_lines(content) do |line, section|
+        if section == "CHECKSUMS"
+          line
+        else
+          line.gsub(/#{Regexp.escape(name)} \(#{Regexp.escape(old_version)}([^)]*)\)/) { "#{name} (#{new_version}#{$1})" }
+        end
+      end
+    end
+
+    def patch_checksum(content, name)
+      replacement = oss_checksum_line(name)
+
+      map_lines(content) do |line, section|
+        if section == "CHECKSUMS" && line.match?(/\A {2}#{Regexp.escape(name)} \(/)
+          replacement
+        else
+          line
+        end
+      end
+    end
+
+    def oss_checksum_line(name)
+      map_lines(File.read(GEMFILE_LOCK)) do |line, section|
+        line if section == "CHECKSUMS" && line.match?(/\A {2}#{Regexp.escape(name)} \(/)
+      end.then { |found| found unless found.empty? }
+    end
+
+    def map_lines(content)
+      section = nil
+
+      content.lines.filter_map do |line|
+        section = line.strip if line.match?(/\A\S/)
+        yield line, section
+      end.join
+    end
+
+    def patch_spec_subdependency(content, parent_name, dep_name, old_req, new_req)
+      in_parent_spec = false
+      content.lines.map do |line|
+        if line.match?(/\A {4}\S/)
+          in_parent_spec = line.match?(/\A {4}#{Regexp.escape(parent_name)} \(/)
+        elsif !line.match?(/\A {6}/)
+          in_parent_spec = false
+        end
+
+        if in_parent_spec && line.match?(/\A {6}#{Regexp.escape(dep_name)} \(#{Regexp.escape(old_req)}\)/)
+          line.sub("#{dep_name} (#{old_req})", "#{dep_name} (#{new_req})")
+        else
+          line
+        end
+      end.join
+    end
+
+    def patch_dependency_requirement(content, name, old_req, new_req)
+      in_deps = false
+      content.lines.map do |line|
+        if line.strip == "DEPENDENCIES"
+          in_deps = true
+        elsif in_deps && line.match?(/\A\S/)
+          in_deps = false
+        end
+
+        if in_deps
+          line.sub(/#{Regexp.escape(name)} \(#{Regexp.escape(old_req)}\)/, "#{name} (#{new_req})")
+        else
+          line
+        end
+      end.join
+    end
+
     def show_diff(original, patched)
       require "tempfile"
 
@@ -176,6 +421,347 @@ when "correct"
   GemfileDriftCorrector.new.correct
 when "forward"
   GemfileDriftForwarder.new.forward
+when "self-test"
+  require "minitest/autorun"
+  require "tmpdir"
+
+  LOCKFILE_TEMPLATE = <<~LOCKFILE
+    GEM
+      remote: https://rubygems.org/
+      specs:
+        shared_gem (%{shared_version})
+        oss_only_gem (1.0.0)
+        saas_only_gem (2.0.0)
+
+    PLATFORMS
+      ruby
+
+    DEPENDENCIES
+    %{dependencies}
+
+    CHECKSUMS
+      shared_gem (%{shared_version}) sha256=%{shared_checksum}
+
+    BUNDLED WITH
+      2.6.2
+  LOCKFILE
+
+  LOCKFILE_WITH_SUBDEPS_TEMPLATE = <<~LOCKFILE
+    GEM
+      remote: https://rubygems.org/
+      specs:
+        child_gem (%{child_version})
+        parent_gem (%{parent_version})
+          child_gem (%{child_req})
+
+    PLATFORMS
+      ruby
+
+    DEPENDENCIES
+      parent_gem (%{parent_dep})
+
+    BUNDLED WITH
+      2.6.2
+  LOCKFILE
+
+  class GemfileDriftCheckerTest < Minitest::Test
+    def setup
+      @original_dir = Dir.pwd
+      @tmpdir = Dir.mktmpdir("bundle-drift-test")
+      Dir.chdir(@tmpdir)
+    end
+
+    def teardown
+      Dir.chdir(@original_dir)
+      FileUtils.rm_rf(@tmpdir)
+    end
+
+    def test_detects_spec_version_drift
+      write_lockfiles(
+        oss_version: "1.0.0", oss_deps: "  shared_gem (~> 1.0)\n  oss_only_gem",
+        saas_version: "2.0.0", saas_deps: "  shared_gem (~> 2.0)\n  saas_only_gem"
+      )
+
+      drift = GemfileDriftChecker.new.send(:find_drift)
+
+      assert_equal 1, drift.length
+      assert_equal "shared_gem", drift.first[:name]
+    end
+
+    def test_detects_dependency_requirement_drift_even_when_spec_versions_match
+      write_lockfiles(
+        oss_version: "1.4.0", oss_deps: "  shared_gem (~> 1.4)\n  oss_only_gem",
+        saas_version: "1.4.0", saas_deps: "  shared_gem (~> 1.3)\n  saas_only_gem"
+      )
+
+      drift = GemfileDriftChecker.new.send(:find_drift)
+
+      assert_equal 1, drift.length
+      assert_equal "shared_gem", drift.first[:name]
+    end
+
+    def test_reports_no_drift_when_specs_and_dependencies_match
+      write_lockfiles(
+        oss_version: "1.4.0", oss_deps: "  shared_gem (~> 1.4)\n  oss_only_gem",
+        saas_version: "1.4.0", saas_deps: "  shared_gem (~> 1.4)\n  saas_only_gem"
+      )
+
+      drift = GemfileDriftChecker.new.send(:find_drift)
+
+      assert_empty drift
+    end
+
+    def test_forward_patches_dependency_requirements_in_addition_to_spec_versions
+      write_lockfiles(
+        oss_version: "1.4.0", oss_deps: "  shared_gem (~> 1.4)\n  oss_only_gem",
+        saas_version: "1.3.2", saas_deps: "  shared_gem (~> 1.3)\n  saas_only_gem"
+      )
+
+      capture_io { GemfileDriftForwarder.new.forward }
+
+      saas_content = File.read("Gemfile.saas.lock")
+      assert_includes saas_content, "shared_gem (1.4.0)"
+      assert_includes saas_content, "shared_gem (~> 1.4)"
+      refute_includes saas_content, "shared_gem (~> 1.3)"
+    end
+
+    def test_forward_replaces_the_stale_checksum_with_the_one_from_gemfile_lock
+      write_lockfiles(
+        oss_version: "1.4.0", oss_deps: "  shared_gem (~> 1.4)\n  oss_only_gem", oss_checksum: "e" * 64,
+        saas_version: "1.3.2", saas_deps: "  shared_gem (~> 1.3)\n  saas_only_gem", saas_checksum: "f" * 64
+      )
+
+      capture_io { GemfileDriftForwarder.new.forward }
+
+      saas_content = File.read("Gemfile.saas.lock")
+      assert_includes saas_content, "shared_gem (1.4.0) sha256=#{"e" * 64}"
+      refute_includes saas_content, "f" * 64
+    end
+
+    def test_forward_drops_the_stale_checksum_when_gemfile_lock_has_none
+      write_lockfiles(
+        oss_version: "1.4.0", oss_deps: "  shared_gem (~> 1.4)\n  oss_only_gem",
+        saas_version: "1.3.2", saas_deps: "  shared_gem (~> 1.3)\n  saas_only_gem", saas_checksum: "f" * 64
+      )
+      File.write("Gemfile.lock", File.read("Gemfile.lock").sub(/^  shared_gem \(1\.4\.0\) sha256=.*\n/, ""))
+
+      capture_io { GemfileDriftForwarder.new.forward }
+
+      saas_content = File.read("Gemfile.saas.lock")
+      assert_includes saas_content, "shared_gem (1.4.0)"
+      refute_includes saas_content, "sha256"
+    end
+
+    def test_forward_copies_a_checksumless_entry_for_gems_resolved_outside_rubygems
+      write_lockfiles(
+        oss_version: "1.4.0", oss_deps: "  shared_gem (~> 1.4)\n  oss_only_gem",
+        saas_version: "1.3.2", saas_deps: "  shared_gem (~> 1.3)\n  saas_only_gem", saas_checksum: "f" * 64
+      )
+      File.write("Gemfile.lock", File.read("Gemfile.lock").sub(/^  shared_gem \(1\.4\.0\) sha256=.*$/, "  shared_gem (1.4.0)"))
+
+      capture_io { GemfileDriftForwarder.new.forward }
+
+      saas_content = File.read("Gemfile.saas.lock")
+      assert_includes saas_content, "CHECKSUMS\n  shared_gem (1.4.0)\n"
+      refute_includes saas_content, "sha256"
+    end
+
+    def test_detects_gem_in_oss_lock_missing_from_saas_lock
+      File.write("Gemfile.lock", <<~LOCK)
+        GEM
+          remote: https://rubygems.org/
+          specs:
+            new_gem (1.0.0)
+            shared_gem (1.0.0)
+
+        PLATFORMS
+          ruby
+
+        DEPENDENCIES
+          new_gem
+          shared_gem
+
+        BUNDLED WITH
+          2.6.2
+      LOCK
+
+      File.write("Gemfile.saas.lock", <<~LOCK)
+        GEM
+          remote: https://rubygems.org/
+          specs:
+            shared_gem (1.0.0)
+
+        PLATFORMS
+          ruby
+
+        DEPENDENCIES
+          shared_gem
+
+        BUNDLED WITH
+          2.6.2
+      LOCK
+
+      drift = GemfileDriftChecker.new.send(:find_drift)
+
+      assert_equal 1, drift.length
+      assert_equal "new_gem", drift.first[:name]
+      assert drift.first[:missing]
+    end
+
+    def test_forward_adds_a_gem_missing_from_the_saas_lock_in_sorted_position
+      write_lockfiles_with_new_transitive_dep
+
+      capture_io { GemfileDriftForwarder.new.forward }
+
+      saas_content = File.read("Gemfile.saas.lock")
+      assert_includes saas_content, "    new_child (3.1.8)\n    other_gem (1.0.0)\n"
+      assert_includes saas_content, "  new_child (3.1.8) sha256=#{"c" * 64}\n  other_gem"
+    end
+
+    def test_forward_adds_every_platform_variant_of_a_missing_native_gem
+      write_lockfiles_with_new_transitive_dep
+      File.write("Gemfile.lock", File.read("Gemfile.lock").sub("    new_child (3.1.8)\n", "    new_child (3.1.8)\n    new_child (3.1.8-aarch64-linux)\n"))
+
+      capture_io { GemfileDriftForwarder.new.forward }
+
+      assert_includes File.read("Gemfile.saas.lock"), "    new_child (3.1.8)\n    new_child (3.1.8-aarch64-linux)\n    other_gem"
+    end
+
+    def test_forward_adds_a_subdependency_absent_from_the_saas_lock
+      write_lockfiles_with_new_transitive_dep
+
+      capture_io { GemfileDriftForwarder.new.forward }
+
+      assert_includes File.read("Gemfile.saas.lock"), "    parent_gem (2.0.0)\n      new_child (~> 3.1)\n"
+    end
+
+    def test_forward_leaves_saas_only_gems_untouched
+      write_lockfiles_with_new_transitive_dep
+
+      capture_io { GemfileDriftForwarder.new.forward }
+
+      assert_includes File.read("Gemfile.saas.lock"), "    saas_only_gem (2.0.0)"
+    end
+
+    def test_forward_resolves_all_drift_when_a_bump_brings_a_new_transitive_dep
+      write_lockfiles_with_new_transitive_dep
+
+      capture_io { GemfileDriftForwarder.new.forward }
+
+      assert_empty GemfileDriftChecker.new.send(:find_drift)
+    end
+
+    def test_forward_removes_a_subdependency_that_gemfile_lock_no_longer_has
+      write_lockfiles_with_subdeps(oss_child_req: "~> 3, >= 3.2.0", saas_child_req: "~> 3, >= 3.2.0")
+      File.write("Gemfile.saas.lock", File.read("Gemfile.saas.lock").sub("    parent_gem (1.0.0)\n", "    parent_gem (1.0.0)\n      dropped_gem (~> 1.0)\n"))
+
+      capture_io { GemfileDriftForwarder.new.forward }
+
+      refute_includes File.read("Gemfile.saas.lock"), "dropped_gem"
+    end
+
+    def test_detects_spec_subdependency_drift_even_when_versions_match
+      write_lockfiles_with_subdeps(
+        oss_child_req: "~> 3, >= 3.2.0",
+        saas_child_req: "~> 3, >= 3.1.0"
+      )
+
+      drift = GemfileDriftChecker.new.send(:find_drift)
+
+      assert_equal 1, drift.length
+      assert_equal "parent_gem", drift.first[:name]
+      assert_equal 1, drift.first[:subdep_changes].length
+      assert_equal "child_gem", drift.first[:subdep_changes].first[:name]
+    end
+
+    def test_no_drift_when_spec_subdependencies_match
+      write_lockfiles_with_subdeps(
+        oss_child_req: "~> 3, >= 3.2.0",
+        saas_child_req: "~> 3, >= 3.2.0"
+      )
+
+      drift = GemfileDriftChecker.new.send(:find_drift)
+
+      assert_empty drift
+    end
+
+    def test_forward_patches_spec_subdependency_requirements
+      write_lockfiles_with_subdeps(
+        oss_child_req: "~> 3, >= 3.2.0",
+        saas_child_req: "~> 3, >= 3.1.0"
+      )
+
+      capture_io { GemfileDriftForwarder.new.forward }
+
+      saas_content = File.read("Gemfile.saas.lock")
+      assert_includes saas_content, "child_gem (~> 3, >= 3.2.0)"
+      refute_includes saas_content, "child_gem (~> 3, >= 3.1.0)"
+    end
+
+    private
+      def write_lockfiles(oss_version:, oss_deps:, saas_version:, saas_deps:, oss_checksum: "a" * 64, saas_checksum: "b" * 64)
+        File.write("Gemfile.lock", LOCKFILE_TEMPLATE % { shared_version: oss_version, dependencies: oss_deps, shared_checksum: oss_checksum })
+        File.write("Gemfile.saas.lock", LOCKFILE_TEMPLATE % { shared_version: saas_version, dependencies: saas_deps, shared_checksum: saas_checksum })
+      end
+
+      def write_lockfiles_with_new_transitive_dep
+        File.write("Gemfile.lock", <<~LOCK)
+          GEM
+            remote: https://rubygems.org/
+            specs:
+              new_child (3.1.8)
+              other_gem (1.0.0)
+              parent_gem (2.0.0)
+                new_child (~> 3.1)
+
+          PLATFORMS
+            ruby
+
+          DEPENDENCIES
+            other_gem
+            parent_gem
+
+          CHECKSUMS
+            new_child (3.1.8) sha256=#{"c" * 64}
+            other_gem (1.0.0) sha256=#{"a" * 64}
+            parent_gem (2.0.0) sha256=#{"b" * 64}
+
+          BUNDLED WITH
+            2.6.2
+        LOCK
+
+        File.write("Gemfile.saas.lock", <<~LOCK)
+          GEM
+            remote: https://rubygems.org/
+            specs:
+              other_gem (1.0.0)
+              parent_gem (1.0.0)
+              saas_only_gem (2.0.0)
+
+          PLATFORMS
+            ruby
+
+          DEPENDENCIES
+            other_gem
+            parent_gem
+            saas_only_gem
+
+          CHECKSUMS
+            other_gem (1.0.0) sha256=#{"a" * 64}
+            parent_gem (1.0.0) sha256=#{"d" * 64}
+            saas_only_gem (2.0.0) sha256=#{"e" * 64}
+
+          BUNDLED WITH
+            2.6.2
+        LOCK
+      end
+
+      def write_lockfiles_with_subdeps(oss_child_req:, saas_child_req:)
+        common = { parent_version: "1.0.0", child_version: "3.2.0", parent_dep: "~> 1.0" }
+        File.write("Gemfile.lock", LOCKFILE_WITH_SUBDEPS_TEMPLATE % common.merge(child_req: oss_child_req))
+        File.write("Gemfile.saas.lock", LOCKFILE_WITH_SUBDEPS_TEMPLATE % common.merge(child_req: saas_child_req))
+      end
+  end
 else
-  abort "Usage: bin/bundle-drift [check|correct|forward]"
+  abort "Usage: bin/bundle-drift [check|correct|forward|self-test]"
 end

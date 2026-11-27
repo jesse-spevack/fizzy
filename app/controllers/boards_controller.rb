@@ -1,7 +1,9 @@
 class BoardsController < ApplicationController
   wrap_parameters :board, include: %i[ name all_access auto_postpone_period_in_days public_description ]
 
-  include FilterScoped
+  include FilterScoped, SearchRateLimiting
+
+  limit_searches only: :show
 
   before_action :set_board, except: %i[ index new create ]
   before_action :ensure_permission_to_admin_board, only: %i[ update destroy ]
@@ -50,7 +52,13 @@ class BoardsController < ApplicationController
           redirect_to root_path, notice: "Saved (you were removed from the board)"
         end
       end
-      format.json { head :no_content }
+      format.json do
+        if @board.accessible_to?(Current.user)
+          render :show
+        else
+          head :no_content
+        end
+      end
     end
   end
 
@@ -64,6 +72,10 @@ class BoardsController < ApplicationController
   end
 
   private
+    def searching?
+      @filter.terms.present?
+    end
+
     def set_board
       @board = Current.user.boards.find params[:id]
     end

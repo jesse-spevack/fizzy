@@ -1,15 +1,76 @@
+<%
+# What the aliases pass to the console with `app exec -e`. A blank USER (a sandbox, cron, launchd,
+# env -i) leaves a bare "CONSOLE_USER:" that breaks this file's YAML, so fall back to LOGNAME, then
+# the login name, taking only a plain login name, which is safe in every alias's quoting.
+# CONSOLE_REASON is the link that authorized a query. On its way to the console it passes through a
+# single-quoted YAML scalar, Shellwords.split, Thor's -e hash (split at the first colon, so a URL
+# arrives whole), Ruby's String#dump and the remote shell, which expands any ${...} Kamal leaves in.
+# Rather than escape for all five, percent-encode every byte outside a URL's own characters: a link
+# arrives unchanged, and anything else arrives as inert ASCII. coworker's bin/failed-jobs renders
+# both values by these names.
+require "etc"
+console_user = [ ENV["USER"], ENV["LOGNAME"], (Etc.getpwuid.name rescue nil) ] \
+  .find { |name| name.to_s.b.match?(/\A[\w.@-]+\z/) } || "uid-#{Process.uid}"
+console_reason = ENV["CONSOLE_REASON"].to_s.b.strip \
+  .gsub(%r{[^A-Za-z0-9 ._~:/?#\[\]!&()*+,;=%-]}) { |byte| format("%%%02X", byte.ord) } \
+  .shellescape.gsub("'", "''")
+-%>
 service: fizzy
 image: basecamp/fizzy
 asset_path: /rails/public/assets
 hooks_path: <%= File.join(Gem::Specification.find_by_name("fizzy-saas").gem_dir, ".kamal", "hooks") %>
 secrets_path: <%= File.join(Gem::Specification.find_by_name("fizzy-saas").gem_dir, ".kamal/secrets") %>
 
+# Kamal logs a hook's output at DEBUG, so the cell build, push, and reboot the hooks do would otherwise
+# only show under -v.
+hooks_output:
+  pre-build: verbose
+  pre-deploy: verbose
+
 servers:
+  # group-add on both roles, because an operation that hands a tool a filename re-opens the caller's
+  # descriptor as /dev/fd/N. That is a fresh open, rechecked against the cell's uid, so a mode 0600
+  # tempfile the app owns is EACCES — which is every Active Storage operation this cell carries except the
+  # analyzers. The app owns the files, so it must be in the group to put them in it: without this the
+  # failure moves rather than goes, from EACCES in the cell to EPERM in the app. Must match HOTCELL_GROUP.
+  #
+  # publish on both roles, because the OTel collector scrapes Yabeda on 9394 from the host. On a rootless
+  # Docker host (staging) the host cannot reach a container's bridge address, so the port has to be
+  # published on loopback. No host port, so Docker picks a free one: the collector itself listens on 9394,
+  # and during a deploy the old and new containers run at the same time. The collector reads the port
+  # from Docker.
+  web:
+    options:
+      group-add: 10001
+      publish: "127.0.0.1::9394"
   jobs:
     cmd: bin/jobs
+    options:
+      group-add: 10001
+      publish: "127.0.0.1::9394"
 
 volumes:
   - fizzy:/rails/storage
+  # The cell's sockets. The app resolves a cell's name under HOTCELL_ROOT, so this path is
+  # $HOTCELL_ROOT/<cell name> while the cell writes them at its own HOTCELL_DIR — only the volume name
+  # has to match. saas/Dockerfile creates this directory owned by 10001, because a new named volume takes
+  # its ownership from the directory it covers in whichever container mounts it first, and on a new host
+  # that is the app.
+  - hotcell-active-storage:/run/hotcell/active_storage
+
+env:
+  clear:
+    # HOTCELL_ROOT registers the cell, which then carries every conversion.
+    # HOTCELL_GROUP is the gid both sides hold, and it must match the group-add above; the client puts
+    # each descriptor in it and narrows the mode, so a cell may read an input and write an output and
+    # neither the reverse nor wider. It is read from the environment rather than written in the source
+    # because development runs the app and its cell as one user, where it must stay unset.
+    HOTCELL_ROOT: /run/hotcell
+    HOTCELL_GROUP: 10001
+    # The hosts a Client ID Metadata Document may be fetched from (Oauth::ClientMetadata): Claude's,
+    # ChatGPT's, Perplexity's and Muse's. Configuration, not a credential, and inert on its own: nothing is
+    # fetched unless the destination also sets OAUTH_CIMD_ENABLED to "true".
+    OAUTH_CIMD_ALLOWED_HOSTS: "mcp.claude.ai claude.ai claude.com chatgpt.com www.perplexity.ai platform.muse.ai"
 
 proxy:
   ssl: true
@@ -28,6 +89,100 @@ builder:
   remote: ssh://app@docker-builder-102
   local: <%= ENV.fetch("KAMAL_BUILDER_LOCAL", "true") %>
 
+# Attachment processing, in a container with no network that holds nothing worth stealing. Declared here
+# rather than per destination because a deploy never touches an accessory — booting one is explicit —
+# so this is inert until someone runs:
+#
+#   bin/kamal accessory reboot hotcell -d <destination>
+#
+# An accessory rather than an app role because Kamal hard-codes --network kamal for roles, and network:
+# none is the point.
+accessories:
+  hotcell:
+    # Immutable, and never `latest`: a reboot pulls whatever the tag names at that moment, so a moving tag
+    # would make what a host runs depend on when it last rebooted. saas/hotcell/bin/build writes the literal
+    # tag; saas/hotcell/bin/push publishes it. Until push has run the pull fails loudly, which is the right
+    # way for an unbuilt image to fail. HOTCELL_IMAGE is how saas/hotcell/bin/check reboots onto another
+    # commit's pin, for a rollback.
+<%- if ENV.fetch("HOTCELL_IMAGE", "") != "" -%>
+    image: <%= ENV["HOTCELL_IMAGE"] %>
+<%- else -%>
+    image: registry.37signals.com/basecamp/fizzy-hotcell:9eb1f922868f
+<%- end -%>
+    roles: [ web, jobs ]  # a descriptor cannot cross machines, so a cell lives on its caller's host
+    # An accessory's own key, not one of the options below. Kamal always emits a --network of its own,
+    # defaulting to `kamal`, so the same setting under `options:` is a second --network flag and Docker
+    # refuses the container outright.
+    network: none
+    volumes:
+      - hotcell-active-storage:/run/hotcell/cell
+      # Scratch from the host's disk rather than a tmpfs, so it stops being RAM charged to the cgroup and
+      # its size stops moving with file_size. The source is the capped loopback filesystem chef's
+      # app_kamal cookbook provisions on every cell host — 4G, mounted nosuid,nodev,noexec, owned by the
+      # cell's uid — because Docker can neither cap a bind mount nor set those flags on one. A fill stays
+      # inside it and reaches the caller as ENOSPC — transient, never recorded against a blob.
+      - /var/lib/hotcell-scratch:/tmp
+    options:
+      # Performance. Docker applies no limit to a flag left out, so a cell without these can take the
+      # host. With scratch on disk the cgroup holds only processes, so memory is sized from
+      # concurrency × peak RSS, kept above the cell's 1536MB rlimit so a breach is a verdict rather than
+      # a SIGKILL. Load testing owns the real numbers.
+      cpus: 2
+      memory: 2g
+      memory-swap: 2g  # equal to memory; omitted, Docker allows twice memory in swap and the limit stops holding
+      # Deliberately no `ulimit: stack`, so the cell inherits the daemon's 8MB. A thread that overflows a
+      # smaller stack dies on SIGSEGV, which the supervisor reports as killed/crashed — transient, so the
+      # request is retried against the same limit for as long as the job keeps trying, and no verdict
+      # names the setting that caused it. Raise the cell's own memory instead.
+
+      # Security. Omit one and the protection is gone while the cell serves requests exactly as before.
+      # `network: none` is above, because it is an accessory key rather than a raw Docker flag.
+      read-only: true
+      cap-drop: ALL
+      security-opt: no-new-privileges:true
+      user: 10001:10001
+      pids-limit: 512
+
+# Hosted Fizzy MCP (basecamp/fizzy-mcp-server, `fizzy-mcp http`). Each destination that runs it names its
+# hosts and its own proxy host. A destination with no proxy host would get an accessory that kamal-proxy
+# routes as a catch-all over the app, so the accessory exists only on those destinations (bc3's
+# basecamp_mcp lesson). Like hotcell, a deploy never touches it; booting it is explicit, and is done a
+# host at a time with saas/bin/mcp-rolling-reboot, never a destination-wide `kamal accessory reboot`
+# (which stops every copy at once).
+#
+# Dark: no FIZZY_MCP_EXCHANGE_* is set, so the server refuses every token and holds no Fizzy credential.
+# Lighting a destination means Fizzy serving the delegation exchange there (hosted plan, phases B-C), the
+# fizzy-mcp-server client and its secret provisioned, and the exchange env and secret added to that
+# destination's file.
+<%- if %w[ production staging beta ].include?(ENV["KAMAL_DESTINATION"]) || ENV["KAMAL_DESTINATION"].to_s.match?(/\Abeta\d+\z/) -%>
+  fizzy_mcp:
+    # The digest basecamp/fizzy-mcp-server's scripts/build-image.sh printed for v0.2.9, built from the
+    # cosign-verified release archives. Hosts boot exactly this content or nothing; bump it only to
+    # another digest that script prints.
+    image: registry.37signals.com/basecamp/fizzy-mcp-server:v0.2.9@sha256:8a7831f3dd1e2dfdda65f6c3b8f45871903f3e068abbcd88bbbe3a98cc9f97ed
+    proxy:
+      app_port: 8080
+      # A request runs at most 45s (hosted.RequestBudget); the server's write timeout is 60s.
+      response_timeout: 60
+      # Keep the load balancer's X-Forwarded-For, whose first entry is the client (the LB's fizzy_mcp
+      # service sets it from True-Client-IP: saas/script/configure-lb-mcp.sh). The server keys its
+      # exchange budget on that entry (FIZZY_MCP_TRUST_PROXY, fizzy-mcp-server#16).
+      forward_headers: true
+      healthcheck:
+        path: /up
+    env:
+      clear:
+        FIZZY_MCP_ADDR: ":8080"
+        FIZZY_MCP_TRUST_PROXY: "true"
+    options:
+      memory: 256m
+      dns-opt: [ "ndots:1", "no-aaaa" ]
+      # On SIGTERM the server stops taking requests and waits up to 30s for the ones in flight. Docker's
+      # default 10s grace would kill it mid-drain.
+      stop-timeout: 35
+<%- end -%>
+
 aliases:
-  console: app exec -i --reuse -e CONSOLE_USER:<%= ENV["USER"] %> "bin/rails console"
-  ssh: app exec -i --reuse -e CONSOLE_USER:<%= ENV["USER"] %> /bin/bash
+  console: app exec -i --reuse -e CONSOLE_USER:<%= console_user %> "bin/rails console"
+  query: 'app exec -q --reuse -p -e CONSOLE_USER:<%= console_user %> CLAUDECODE:<%= ENV["CLAUDECODE"] %> CODEX_THREAD_ID:<%= ENV["CODEX_THREAD_ID"] %> CONSOLE_REASON:<%= console_reason %> "bin/rails query"'
+  ssh: app exec -i --reuse -e CONSOLE_USER:<%= console_user %> /bin/bash

@@ -1,0 +1,139 @@
+module OauthHelper
+  # Bidirectional controls can make a name read as something else, or push the
+  # host beside it out of place. A self-registered name is the app's own claim,
+  # so they go before it is shown anywhere.
+  BIDI_CONTROLS = /[؜‎‏‪-‮⁦-⁩]/
+
+  # Grouped by what the app is (Oauth::Client#connection_kind), in this order;
+  # a group with nothing in it isn't shown.
+  CONNECTED_APP_GROUPS = {
+    web: "Apps and assistants on the web",
+    local: "Apps on your devices",
+    fizzy: "Fizzy apps"
+  }
+
+  ACCESS_LEVELS = {
+    "read" => {
+      label: "Read only",
+      description: "See boards, cards, comments and people. It can't change anything."
+    },
+    "read write" => {
+      label: "Read and write",
+      description: "Also create, edit, move, close and delete cards, comments and boards."
+    }
+  }
+
+  # What went wrong, in plain words, for the person on the authorization error
+  # page, by OAuth error code. A caller with more to say about its case passes
+  # its own. The code and its developer description are shown beneath, so
+  # whoever made the app can tell exactly which check refused it.
+  OAUTH_ERROR_MESSAGES = {
+    "invalid_request" => "The app sent a request to connect that Fizzy can't accept.",
+    "unauthorized_client" => "This app isn't set up to connect to Fizzy this way.",
+    "invalid_client_metadata" => "Fizzy couldn't read the details this app publishes about itself.",
+    "temporarily_unavailable" => "Fizzy is too busy to connect this app right now. Wait a moment, then try again.",
+    "unsupported_response_type" => "The app asked to connect in a way Fizzy doesn't support.",
+    "invalid_scope" => "The app asked for more access than it's allowed.",
+    "invalid_target" => "The app asked to connect to something Fizzy doesn't recognize.",
+    "access_denied" => "This app can't be connected to your Fizzy account.",
+    "slow_down" => "There have been too many attempts. Wait a minute, then try again."
+  }
+
+  def oauth_error_message(error, message = nil)
+    message.presence || OAUTH_ERROR_MESSAGES.fetch(error.to_s, "Something went wrong connecting this app.")
+  end
+
+  # A name of nothing but direction controls is no name, so it reads as one.
+  def oauth_client_self_name(client)
+    client.name.to_s.gsub(BIDI_CONTROLS, "").presence || "Unnamed app"
+  end
+
+  # A metadata document client whose host isn't allowlisted: the open tier of
+  # Oauth::ClientMetadata, whose developer we don't know.
+  def oauth_client_unrecognized?(client)
+    client.open_tier?
+  end
+
+  # Lowercase, as a browser reads it. nil for a callback that stays on this
+  # device: loopback, or an app's own URL scheme.
+  def oauth_redirect_host(redirect_uri)
+    uri = URI.parse(redirect_uri.to_s)
+
+    if uri.host.present? && !Oauth.loopback_host?(uri.host) && uri.scheme.to_s.downcase.in?(%w[ http https ])
+      uri.port == uri.default_port ? uri.host.downcase : "#{uri.host.downcase}:#{uri.port}"
+    end
+  rescue URI::InvalidURIError
+    nil
+  end
+
+  # Every place outside this device a client's access can go, as consent would
+  # name each one. A client may register several callbacks, and its grants may
+  # have come through any of them, so none speaks for the rest.
+  def oauth_client_remote_hosts(client)
+    client.redirect_uris.filter_map { |uri| oauth_redirect_host(uri) }.uniq
+  end
+
+  # Where a self-registered app's access can go, as its Connected apps byline
+  # names it: every remote host, and this device too where any callback stays
+  # on it, since its grants may have come through either.
+  def oauth_client_destinations(client)
+    hosts = oauth_client_remote_hosts(client)
+    on_device = hosts.empty? || client.redirect_uris.any? { |uri| oauth_redirect_host(uri).nil? }
+
+    [ ("the app at #{hosts.to_sentence(two_words_connector: " or ", last_word_connector: " or ")}" if hosts.any?),
+      ("an app on your device" if on_device) ].compact.join(", or ")
+  end
+
+  # The access levels a client may be granted, weakest first, each with what
+  # it lets the app do in a few words. Which accounts it reaches is said once,
+  # under the choices (oauth/authorizations/access).
+  def oauth_access_levels(client)
+    levels = client.scopes.include?("write") ? ACCESS_LEVELS.keys : %w[ read ]
+    ACCESS_LEVELS.slice(*levels).to_a
+  end
+
+  def oauth_strongest_permission(tokens)
+    if tokens.any?(&:write?)
+      "write"
+    elsif tokens.any?
+      "read"
+    end
+  end
+
+  def oauth_access_label(permission)
+    ACCESS_LEVELS.fetch(Oauth.canonical_scope(permission))[:label]
+  end
+
+  # What an app's grants together let it do, as [ permission, accounts ]
+  # pairs, accounts nil for every account the person belongs to. An unbound
+  # grant reaches every account; a bound one adds only its own, and only
+  # where it grants more, so no pair claims more than some grant gives.
+  def oauth_connected_app_reach(tokens)
+    # A grant bound to an account since deleted, cancelled, or left reaches
+    # nothing: refreshing it would be refused, so it isn't shown as reach.
+    unbound, bound = tokens.partition { |token| !token.account_bound? }
+    bound = bound.select { |token| token.account && oauth_active_account_ids.include?(token.account_id) }
+    everywhere = oauth_strongest_permission(unbound)
+
+    reach = bound.group_by(&:account).filter_map do |account, account_tokens|
+      permission = oauth_strongest_permission(account_tokens)
+      [ permission, account ] if everywhere.nil? || (permission == "write" && everywhere == "read")
+    end
+
+    [ (everywhere && [ everywhere, nil ]), *reach.group_by(&:first).map { |permission, pairs| [ permission, pairs.map(&:last) ] } ].compact
+  end
+
+  # The accounts the signed-in person is still active in, read once per render
+  # however many apps the page lists.
+  def oauth_active_account_ids
+    @oauth_active_account_ids ||= Current.identity.users_with_active_accounts.pluck(:account_id).to_set
+  end
+
+  def connected_app_groups(connected_apps)
+    by_kind = connected_apps.group_by { |client, _| client.connection_kind }
+
+    CONNECTED_APP_GROUPS.filter_map do |kind, heading|
+      [ kind, heading, by_kind[kind] ] if by_kind[kind].present?
+    end
+  end
+end

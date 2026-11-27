@@ -15,9 +15,9 @@ And then run the development server:
 bin/dev
 ```
 
-You'll be able to access the app in development at http://fizzy.localhost:3006.
+You'll be able to access the app in development at http://app.fizzy.localhost:3006.
 
-To login, enter `david@example.com` and grab the verification code from the browser console to sign in.
+To log in, enter `david@example.com`. In development the verification code is shown on the page itself, under "Psst, here's your code" — no need to check your email.
 
 ### Web Push Notifications
 
@@ -62,7 +62,7 @@ The remote CI pipeline will run tests against both SQLite and MySQL.
 
 ### Outbound Emails
 
-You can view email previews at http://fizzy.localhost:3006/rails/mailers.
+You can view email previews at http://app.fizzy.localhost:3006/rails/mailers.
 
 You can enable or disable [`letter_opener`](https://github.com/ryanb/letter_opener) to open sent emails automatically with:
 
