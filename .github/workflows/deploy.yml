@@ -52,6 +52,9 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
+      - name: Install MySQL client headers for mysql2
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libmariadb-dev
+
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
