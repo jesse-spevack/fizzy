@@ -50,4 +50,5 @@ logging:
 
 builder:
   arch: amd64
-  remote: ssh://jesse@34.63.167.166
+  cache:
+    type: registry
