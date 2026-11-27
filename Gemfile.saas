@@ -7,8 +7,13 @@ gem "activeresource", require: "active_resource"
 gem "actionpack-xml_parser" # needed by queenbee for XML request body parsing
 gem "queenbee", bc: "queenbee-plugin"
 gem "fizzy-saas", path: "saas"
-gem "console1984", bc: "console1984"
-gem "audits1984", bc: "audits1984", branch: "flavorjones/coworker-api"
+gem "console1984", bc: "console1984", tag: "v0.2.5"
+gem "audits1984", bc: "audits1984"
+
+# Attachment processing in an unprivileged sibling container
+gem "hotcell-client", "0.6.0"
+gem "activestorage-hotcell-client", "0.6.0"
+gem "yabeda-hotcell", "0.6.0"
 
 # Native push notifications (iOS/Android)
 gem "action_push_native"

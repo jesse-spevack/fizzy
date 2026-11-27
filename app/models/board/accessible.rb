@@ -47,6 +47,7 @@ module Board::Accessible
     notifications_for_user(user).destroy_all
     watches_for(user).destroy_all
     pins_for(user).destroy_all
+    assignments_for(user).destroy_all
   end
 
   def watchers
@@ -84,7 +85,7 @@ module Board::Accessible
       #
       # Notification->Event->Mention->Card and Notification->Event->Mention->Comment->Card are
       # handled by destroying mentions_for_user.
-      uuid_type = ActiveRecord::Type.lookup(:uuid, adapter: :trilogy)
+      uuid_type = ActiveRecord::Type.lookup(:uuid, adapter: :mysql2)
       board_id_binary = uuid_type.serialize(id)
 
       user.notifications
@@ -99,6 +100,10 @@ module Board::Accessible
 
     def watches_for(user)
       Watch.where(card: cards, user: user)
+    end
+
+    def assignments_for(user)
+      Assignment.where(card: cards, assignee: user)
     end
 
     def pins_for(user)

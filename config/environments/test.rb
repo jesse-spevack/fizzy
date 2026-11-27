@@ -68,6 +68,20 @@ Rails.application.configure do
   # Load test helpers
   config.autoload_paths += %w[ test/test_helpers ]
 
+  # OAuth is lit in tests; see OauthAvailabilityTestHelper to go dark.
+  config.x.oauth.acceptance_enabled = true
+  config.x.oauth.cimd_enabled = true
+  config.x.oauth.cimd_allowed_hosts = %w[ mcp.claude.ai claude.ai claude.com chatgpt.com www.perplexity.ai platform.muse.ai ]
+
   # Enable multi-tenant mode for tests
   config.x.multi_tenant.enabled = true
+
+  # The open tier of metadata documents is on in tests, but not the fetch lease,
+  # whose slots parallel workers would contend for; its own tests turn it on.
+  config.x.oauth.cimd_open_registration = true
+  config.x.oauth.cimd_fetch_lease = false
+
+  # Serve the Trusted Types report-only policy so system tests can inventory
+  # the DOM sinks that would violate it. See TrustedTypesViolationsTestHelper.
+  config.x.content_security_policy.trusted_types_sample_rate = 1
 end

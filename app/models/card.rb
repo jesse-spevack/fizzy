@@ -1,7 +1,7 @@
 class Card < ApplicationRecord
   include Accessible, Assignable, Attachments, Broadcastable, Closeable, Colored, Commentable,
     Entropic, Eventable, Exportable, Golden, Mentions, Multistep, Pinnable, Postponable, Promptable,
-    Readable, Searchable, Stallable, Statuses, Storage::Tracked, Taggable, Triageable, Watchable
+    Readable, Stallable, Statuses, Storage::Tracked, Taggable, Triageable, Watchable
 
   belongs_to :account, default: -> { board.account }
   belongs_to :board
@@ -11,6 +11,16 @@ class Card < ApplicationRecord
   has_one_attached :image, dependent: :purge_later
 
   has_rich_text :description
+
+  SEARCH_CONTENT_LIMIT = 32.kilobytes
+
+  has_search index: :searchable, async: false, if: :published?,
+    scope: -> { preload(:board, :creator).with_rich_text_description },
+    serializer: ->(card) {
+    { account_id: card.account_id, card_id: card.id, board_id: card.board_id,
+      title: card.title, content: card.description.to_plain_text.truncate_bytes(SEARCH_CONTENT_LIMIT, omission: ""),
+      created_at: card.created_at }
+  }
 
   before_save :set_default_title, if: :published?
   before_create :assign_number
@@ -30,6 +40,7 @@ class Card < ApplicationRecord
     when "stalled" then stalled
     when "postponing_soon" then postponing_soon
     when "closed" then closed
+    when "maybe" then awaiting_triage
     when "not_now" then postponed.latest
     when "golden" then golden
     when "draft" then drafted
@@ -44,6 +55,12 @@ class Card < ApplicationRecord
     when "latest" then latest
     else latest
     end
+  end
+
+  scope :mentioning, ->(query, user:) do
+    search = user.search_relation(query)
+    joins("INNER JOIN #{search.model.table_name} ON #{search.model.table_name}.card_id = cards.id")
+      .merge(search.except(:select, :order))
   end
 
   def card
@@ -82,6 +99,7 @@ class Card < ApplicationRecord
 
       remove_inaccessible_notifications_later
       clean_inaccessible_data_later
+      reindex_comments_later
     end
 
     def track_board_change_event(old_board_name)
@@ -89,6 +107,6 @@ class Card < ApplicationRecord
     end
 
     def assign_number
-      self.number ||= account.increment!(:cards_count).cards_count
+      self.number ||= account.with_lock { account.increment!(:cards_count).cards_count }
     end
 end

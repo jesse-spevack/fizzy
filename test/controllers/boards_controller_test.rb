@@ -36,6 +36,19 @@ class BoardsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Remodel Punch List", board.name
   end
 
+  test "create with an auto-postpone period" do
+    assert_difference -> { Board.count }, +1 do
+      assert_no_changes -> { entropies("37s_account").reload.auto_postpone_period } do
+        post boards_path, params: { board: { name: "Remodel Punch List", auto_postpone_period_in_days: 7 } }
+      end
+    end
+
+    board = Board.last
+    assert_redirected_to board_path(board)
+    assert_equal 7.days, board.entropy.reload.auto_postpone_period
+    assert_equal board.account, board.entropy.account
+  end
+
   test "edit" do
     get edit_board_path(boards(:writebook))
     assert_response :success
@@ -217,6 +230,19 @@ class BoardsControllerTest < ActionDispatch::IntegrationTest
     assert_equal users(:kevin).boards.count, @response.parsed_body.count
   end
 
+  test "index as JSON includes public_description fields for published boards" do
+    board = boards(:writebook)
+    board.publish
+    board.update!(public_description: "<p>Public board description.</p>")
+
+    get boards_path, as: :json
+    assert_response :success
+
+    published_board = @response.parsed_body.find { |b| b["id"] == board.id }
+    assert_equal board.public_description.to_plain_text, published_board["public_description"]
+    assert_equal board.public_description.to_s, published_board["public_description_html"]
+  end
+
   test "index as JSON paginates and preserves recently-accessed order" do
     account = accounts("37s")
     kevin = users(:kevin)
@@ -261,6 +287,43 @@ class BoardsControllerTest < ActionDispatch::IntegrationTest
     assert_equal boards(:writebook).auto_postpone_period_in_days, @response.parsed_body["auto_postpone_period_in_days"]
   end
 
+  test "show as JSON includes public_description fields when published" do
+    board = boards(:writebook)
+    board.publish
+    board.update!(public_description: "<p>This is a <strong>public</strong> note.</p>")
+
+    get board_path(board), as: :json
+    assert_response :success
+    assert_equal board.public_description.to_plain_text, @response.parsed_body["public_description"]
+    assert_equal board.public_description.to_s, @response.parsed_body["public_description_html"]
+  end
+
+  test "show as JSON excludes public_description fields when not published" do
+    board = boards(:writebook)
+    board.update!(public_description: "<p>This is a <strong>public</strong> note.</p>")
+    assert_not board.published?
+
+    get board_path(board), as: :json
+    assert_response :success
+    assert_nil @response.parsed_body["public_description"]
+    assert_nil @response.parsed_body["public_description_html"]
+  end
+
+  test "show as JSON includes granted user_ids when board is not all access" do
+    board = boards(:private)
+    board.accesses.revise granted: users(:david, :jz), revoked: []
+
+    get board_path(board), as: :json
+    assert_response :success
+    assert_equal board.users.ids.sort, @response.parsed_body["user_ids"].sort
+  end
+
+  test "show as JSON excludes user_ids when board is all access" do
+    get board_path(boards(:writebook)), as: :json
+    assert_response :success
+    assert_nil @response.parsed_body["user_ids"]
+  end
+
   test "show as JSON includes public_url when published" do
     board = boards(:writebook)
     board.publish
@@ -289,13 +352,42 @@ class BoardsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "My new board", @response.parsed_body["name"]
   end
 
+  test "create as JSON with an auto-postpone period" do
+    assert_difference -> { Board.count }, +1 do
+      post boards_path, params: { board: { name: "My new board", auto_postpone_period_in_days: 7 } }, as: :json
+    end
+
+    assert_response :created
+    assert_equal 7, @response.parsed_body["auto_postpone_period_in_days"]
+    assert_equal 7.days, Board.last.entropy.reload.auto_postpone_period
+  end
+
   test "update as JSON" do
     board = boards(:writebook)
 
     put board_path(board), params: { board: { name: "Updated Name" } }, as: :json
 
+    assert_response :success
+    assert_equal "Updated Name", board.reload.name
+
+    json = @response.parsed_body
+    assert_equal board.id, json["id"]
+    assert_equal "Updated Name", json["name"]
+    assert_equal board.creator.id, json["creator"]["id"]
+  end
+
+  test "update as JSON returns no content when user removes themselves from board" do
+    board = boards(:writebook)
+
+    put board_path(board), params: {
+      board: { name: "Updated Name", all_access: false },
+      user_ids: users(:david, :jz).pluck(:id)
+    }, as: :json
+
     assert_response :no_content
     assert_equal "Updated Name", board.reload.name
+    assert_not board.users.include?(users(:kevin))
+    assert_empty response.body
   end
 
   test "destroy as JSON" do

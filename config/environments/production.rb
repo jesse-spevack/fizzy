@@ -119,6 +119,53 @@ Rails.application.configure do
   # Do not dump schema after migrations.
   config.active_record.dump_schema_after_migration = false
 
+  # The OAuth authorization server ships dark: unless OAUTH_ACCEPTANCE_ENABLED is
+  # "true" there is no discovery, registration, authorization or token endpoint,
+  # and OAuth-issued tokens are refused. OAUTH_ISSUANCE_ENABLED=false pauses
+  # minting while existing tokens keep working. OAUTH_PILOT_CLIENT_IDS
+  # (comma-separated client_ids) exempts named clients from both switches.
+  # See Oauth::Availability. Applies to beta and staging, which load this file.
+  config.x.oauth.acceptance_enabled = ENV["OAUTH_ACCEPTANCE_ENABLED"] == "true"
+  config.x.oauth.issuance_enabled = ENV["OAUTH_ISSUANCE_ENABLED"] != "false"
+  config.x.oauth.pilot_client_ids = ENV.fetch("OAUTH_PILOT_CLIENT_IDS", "").split(",").map(&:strip).compact_blank
+  # CONNECTED_APPS_PREVIEW=true keeps connecting apps in preview: only 37signals
+  # staff and the reviewers CONNECTED_APPS_PREVIEW_REVIEWERS lists (identity ids,
+  # separated by commas or spaces) can connect an app or use an OAuth token,
+  # whichever client asks; personal access tokens are unaffected. Its old name,
+  # OAUTH_STAFF_ONLY, still counts while CONNECTED_APPS_PREVIEW is unset. Read
+  # after initialization, since Oauth::Availability parses both.
+  config.after_initialize do
+    config.x.oauth.connected_apps_preview = Oauth::Availability.connected_apps_preview_from(ENV)
+    config.x.oauth.connected_apps_preview_reviewer_ids = Oauth::Availability.reviewer_ids_from(ENV["CONNECTED_APPS_PREVIEW_REVIEWERS"])
+  end
+
+  # Client ID Metadata Documents are off unless OAUTH_CIMD_ENABLED is "true",
+  # and then fetched only from the hosts OAUTH_CIMD_ALLOWED_HOSTS names
+  # (space-separated, exact hosts; e.g. "mcp.claude.ai claude.ai claude.com
+  # chatgpt.com www.perplexity.ai platform.muse.ai"). See Oauth::ClientMetadata.
+  config.x.oauth.cimd_enabled = ENV["OAUTH_CIMD_ENABLED"] == "true"
+  config.x.oauth.cimd_allowed_hosts = ENV.fetch("OAUTH_CIMD_ALLOWED_HOSTS", "").split
+
+  # The open tier of Client ID Metadata Documents, off unless
+  # OAUTH_CIMD_OPEN_REGISTRATION is "true": then any https host that publishes a
+  # valid document may request consent, with a warning that we don't know the
+  # app, a fetch budget per registrable domain, a cap on the apps one person
+  # connects and a bound on concurrent fetches. See Oauth::ClientMetadata and
+  # Oauth::ClientMetadata::FetchLease. Turning it off refuses new
+  # authorizations for hosts that aren't allowlisted, clients already
+  # provisioned from one included; grants they hold keep working.
+  config.x.oauth.cimd_open_registration = ENV["OAUTH_CIMD_OPEN_REGISTRATION"] == "true"
+
+  # Domains whose metadata documents are refused, for an incident:
+  # OAUTH_CIMD_BLOCKED_DOMAINS, space-separated, matched case-insensitively.
+  # An entry blocks its own host and every host under it, so a registrable
+  # domain ("example.com") blocks all of it and a narrower entry
+  # ("tools.example.com") only that part. Either tier, before any fetch, and
+  # clients already provisioned from a blocked domain stop resolving too, as
+  # unknown clients. Grants already issued keep working, since the token
+  # endpoint never resolves documents: revoking those is a separate step.
+  config.x.oauth.cimd_blocked_domains = ENV.fetch("OAUTH_CIMD_BLOCKED_DOMAINS", "").split
+
   # Skip DNS rebinding protection for the default health check endpoint.
   # config.host_authorization = { exclude: ->(request) { request.path == "/up" } }
 end

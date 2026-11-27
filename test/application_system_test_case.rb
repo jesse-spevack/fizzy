@@ -1,6 +1,8 @@
 require "test_helper"
 
 class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
+  include TrustedTypesViolationsTestHelper
+
   browser_options = Selenium::WebDriver::Chrome::Options.new.tap do |opts|
     opts.add_argument("--window-size=1200,800")
     opts.add_argument("--disable-extensions")
@@ -33,5 +35,11 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
     def sign_in_as(user)
       visit session_transfer_url(user.identity.transfer_id, script_name: nil)
       assert_current_path root_path
+    end
+
+    def fill_in_lexxy(selector = "lexxy-editor", with:)
+      editor_element = find(selector)
+      editor_element.set with
+      page.execute_script("arguments[0].value = '#{with}'", editor_element)
     end
 end

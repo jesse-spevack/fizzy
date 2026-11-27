@@ -1,7 +1,10 @@
 # Automatically use UUID type for all binary(16) columns and generate defaults
 
 module UuidPrimaryKeyDefault
-  def load_schema!
+  # Rails builds the schema context's attribute set (applying pending attribute
+  # modifications) inside `load_schema`, before the model's own `load_schema!`
+  # hook runs, so the default has to be registered as the context is built.
+  def build_schema_context
     define_uuid_primary_key_pending_default
     super
   end
@@ -32,7 +35,7 @@ module MysqlUuidAdapter
   # Override lookup_cast_type to recognize binary(16) as UUID type
   def lookup_cast_type(sql_type)
     if sql_type == "binary(16)"
-      ActiveRecord::Type.lookup(:uuid, adapter: :trilogy)
+      ActiveRecord::Type.lookup(:uuid, adapter: :mysql2)
     else
       super
     end
@@ -113,7 +116,7 @@ ActiveSupport.on_load(:active_record) do
   ActiveRecord::ConnectionAdapters::TableDefinition.prepend(TableDefinitionUuidSupport)
 end
 
-ActiveSupport.on_load(:active_record_trilogyadapter) do
+ActiveSupport.on_load(:active_record_mysql2adapter) do
   ActiveRecord::ConnectionAdapters::AbstractMysqlAdapter.prepend(MysqlUuidAdapter)
   ActiveRecord::ConnectionAdapters::MySQL::SchemaDumper.prepend(SchemaDumperUuidType)
 end

@@ -15,6 +15,27 @@ class CardsControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
   end
 
+  test "index as JSON can filter by workflow column id" do
+    get cards_path(format: :json), params: { column_ids: [ columns(:writebook_in_progress).id ] }
+    assert_response :success
+
+    assert_equal [ cards(:text).number ], @response.parsed_body.pluck("number")
+  end
+
+  test "index as JSON can OR multiple workflow column ids" do
+    get cards_path(format: :json), params: { column_ids: [ columns(:writebook_triage).id, columns(:writebook_in_progress).id ] }
+    assert_response :success
+
+    assert_equal [ cards(:logo).number, cards(:layout).number, cards(:text).number ].sort, @response.parsed_body.pluck("number").sort
+  end
+
+  test "index as JSON can filter by maybe index" do
+    get cards_path(format: :json), params: { indexed_by: "maybe" }
+    assert_response :success
+
+    assert_equal [ cards(:buy_domain).number ], @response.parsed_body.pluck("number")
+  end
+
   test "create a new draft" do
     assert_difference -> { Card.count }, 1 do
       post board_cards_path(boards(:writebook))
@@ -173,6 +194,27 @@ class CardsControllerTest < ActionDispatch::IntegrationTest
 
     get card_path(card)
     assert_response :success
+  end
+
+  test "show card with comment containing image attachment with alt text" do
+    card = cards(:logo)
+    blob = ActiveStorage::Blob.create_and_upload!(io: file_fixture("moon.jpg").open, filename: "moon.jpg")
+    card.comments.create! \
+      creator: users(:kevin),
+      body: %(<action-text-attachment sgid="#{blob.attachable_sgid}" alt="A full moon"></action-text-attachment>)
+
+    get card_path(card)
+    assert_select "action-text-attachment img[alt='A full moon']"
+  end
+
+  test "show card with comment containing remote image attachment with alt text" do
+    card = cards(:logo)
+    card.comments.create! \
+      creator: users(:kevin),
+      body: %(<action-text-attachment url="https://example.com/moon.jpg" content-type="image/jpeg" alt="A full moon"></action-text-attachment>)
+
+    get card_path(card)
+    assert_select "action-text-attachment img[alt='A full moon']"
   end
 
   test "show as JSON" do

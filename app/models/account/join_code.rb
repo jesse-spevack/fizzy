@@ -10,9 +10,14 @@ class Account::JoinCode < ApplicationRecord
 
   before_create :generate_code, if: -> { code.blank? }
 
+  # with_lock reloads the row, so a reset that lands between finding this code
+  # and taking the lock shows up as a different code here, and the stale one
+  # is refused rather than redeemed against the reset's fresh usage count.
   def redeem_if(&block)
+    redeemed_code = code
+
     with_lock do
-      increment!(:usage_count) if active? && block.call(account)
+      increment!(:usage_count) if code == redeemed_code && active? && block.call(account)
     end
   end
 
@@ -23,6 +28,13 @@ class Account::JoinCode < ApplicationRecord
   def reset
     generate_code
     self.usage_count = 0
+    cap_usage_limit
+    save!
+  end
+
+  def import(attributes)
+    assign_attributes(attributes)
+    cap_usage_limit
     save!
   end
 
@@ -32,5 +44,11 @@ class Account::JoinCode < ApplicationRecord
         candidate = SecureRandom.base58(CODE_LENGTH).scan(/.{4}/).join("-")
         break candidate unless self.class.exists?(code: candidate)
       end
+    end
+
+    # Limits saved before the cap was added can sit above it, and would fail
+    # validation the next time the row is saved.
+    def cap_usage_limit
+      self.usage_limit = USAGE_LIMIT_MAX if usage_limit > USAGE_LIMIT_MAX
     end
 end

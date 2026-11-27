@@ -1,0 +1,27 @@
+module OauthAvailabilityTestHelper
+  AVAILABILITY_KEYS = %i[ acceptance_enabled issuance_enabled pilot_client_ids connected_apps_preview connected_apps_preview_reviewer_ids ]
+
+  def with_oauth_availability(acceptance: true, issuance: true, pilot_client_ids: [], preview: false, reviewer_ids: [])
+    config = Rails.application.config.x.oauth
+    saved = config.to_h.slice(*AVAILABILITY_KEYS)
+
+    config.acceptance_enabled = acceptance
+    config.issuance_enabled = issuance
+    config.pilot_client_ids = pilot_client_ids
+    config.connected_apps_preview = preview
+    config.connected_apps_preview_reviewer_ids = reviewer_ids
+    yield
+  ensure
+    AVAILABILITY_KEYS.each { |key| config[key] = saved[key] }
+  end
+
+  # Any other config.x.oauth settings, restored afterwards.
+  def with_oauth_config(**settings)
+    config = Rails.application.config.x.oauth
+    saved = settings.keys.index_with { |key| config[key] }
+    settings.each { |key, value| config[key] = value }
+    yield
+  ensure
+    saved&.each { |key, value| config[key] = value }
+  end
+end

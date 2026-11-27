@@ -26,6 +26,17 @@ class Account::JoinCodeTest < ActiveSupport::TestCase
     end
   end
 
+  test "redeem_if refuses a code reset after it was found" do
+    join_code = account_join_codes(:"37s")
+    Account::JoinCode.find(join_code.id).reset
+    joined = false
+
+    assert_no_difference -> { Account::JoinCode.find(join_code.id).usage_count } do
+      join_code.redeem_if { joined = true }
+    end
+    assert_not joined
+  end
+
   test "reset" do
     join_code = account_join_codes(:"37s")
     original_code = join_code.code
@@ -34,5 +45,14 @@ class Account::JoinCodeTest < ActiveSupport::TestCase
 
     assert_not_equal original_code, join_code.code
     assert_equal 0, join_code.usage_count
+  end
+
+  test "reset caps a usage limit saved before the cap existed" do
+    join_code = account_join_codes(:"37s")
+    join_code.update_columns(usage_limit: Account::JoinCode::USAGE_LIMIT_MAX + 1)
+
+    join_code.reset
+
+    assert_equal Account::JoinCode::USAGE_LIMIT_MAX, join_code.reload.usage_limit
   end
 end
